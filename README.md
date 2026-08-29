@@ -18,15 +18,18 @@ Currently implemented:
 - Wallet balance management
 - Deposit operation
 - Domain-level credit/debit operations
+- Transactional wallet-to-wallet transfers
+- Automatic debit and credit ledger entries for each transfer
+- Transfer status tracking
 - PostgreSQL persistence
 - Database migrations with Flyway
 - Transfer persistence model
 - Ledger persistence model
 - Request validation
-- Basic exception handling
-- Dockerized PostgreSQL environment
+- Structured API error responses
+- Dockerized application and PostgreSQL environment
 
-Transfer processing and advanced distributed-system features are currently under development.
+Concurrency controls, idempotency, event-driven processing, and other advanced distributed-system features are currently under development.
 
 ---
 
@@ -151,6 +154,8 @@ wallet.debit(amount);
 
 rather than exposing arbitrary balance setters.
 
+Transfers run inside a single database transaction. A successful transfer debits the source wallet, credits the target wallet, creates the transfer record, and writes matching `DEBIT` and `CREDIT` ledger entries. Any failure rolls back the complete operation.
+
 ---
 
 ## Database
@@ -179,21 +184,57 @@ This allows Flyway to remain responsible for database schema evolution while Hib
 
 ---
 
-## Running Locally
+## Running the Project
 
 ### Requirements
 
-- Java 17+
 - Docker
 - Docker Compose
 
-### Start PostgreSQL
+### Docker Compose (Recommended)
+
+Build and start both PostgreSQL and the application:
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 
-### Run the application
+PostgreSQL is health-checked before the application starts. The API will be available at:
+
+```text
+http://localhost:8080
+```
+
+View service status and application logs:
+
+```bash
+docker compose ps
+docker compose logs -f wallet-service
+```
+
+Stop the services:
+
+```bash
+docker compose down
+```
+
+To also remove the PostgreSQL data volume:
+
+```bash
+docker compose down -v
+```
+
+> `docker compose down -v` permanently deletes the local database data.
+
+### Run the Application Locally
+
+This option requires Java 17+. Start only PostgreSQL first:
+
+```bash
+docker compose up -d postgres
+```
+
+Then run Spring Boot:
 
 ```bash
 ./gradlew bootRun
@@ -265,13 +306,60 @@ POST /api/v1/wallets/1/deposit
 GET /api/v1/wallets/1
 ```
 
+### Create Transfer
+
+```http
+POST /api/v1/transfers
+```
+
+```json
+{
+  "sourceWalletId": 1,
+  "targetWalletId": 2,
+  "amount": 250.00
+}
+```
+
+Example response:
+
+```json
+{
+  "id": 1,
+  "sourceWalletId": 1,
+  "targetWalletId": 2,
+  "amount": 250.00,
+  "currency": "TRY",
+  "status": "COMPLETED"
+}
+```
+
+The source and target wallets must be different and use the same currency. The source wallet must have sufficient balance.
+
+### Get Transfer
+
+```http
+GET /api/v1/transfers/1
+```
+
+### Error Responses
+
+Invalid requests, missing resources, and insufficient balances return a structured response:
+
+```json
+{
+  "timestamp": "2026-08-29T12:00:00Z",
+  "status": 400,
+  "error": "Bad Request",
+  "message": "Insufficient balance",
+  "path": "/api/v1/transfers"
+}
+```
+
 ---
 
-## Transfer Design
+## Transfer Flow
 
-The transfer operation is being designed so that all balance and ledger changes occur within a single database transaction.
-
-Target flow:
+All balance, transfer, and ledger changes occur within a single database transaction:
 
 ```text
 Transfer Request
@@ -300,7 +388,7 @@ Create Transfer
 Commit
 ```
 
-If any operation fails, the entire transaction should be rolled back.
+If any operation fails, the entire transaction is rolled back.
 
 ---
 
@@ -366,8 +454,9 @@ Planned topics include:
 - [x] Flyway migrations
 - [x] Transfer database model
 - [x] Ledger database model
-- [ ] Transactional wallet-to-wallet transfer
-- [ ] Ledger generation
+- [x] Transactional wallet-to-wallet transfer
+- [x] Ledger generation
+- [x] Structured API exception handling
 
 ### Phase 2 — Consistency & Concurrency
 
@@ -405,7 +494,8 @@ Planned topics include:
 
 ### Phase 6 — Deployment
 
-- [ ] Application Docker image
+- [x] Application Docker image
+- [x] Docker Compose environment
 - [ ] Kubernetes manifests
 - [ ] Health/readiness probes
 - [ ] CI/CD pipeline

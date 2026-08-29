@@ -4,6 +4,7 @@ import java.math.BigDecimal;
 
 import org.springframework.stereotype.Service;
 
+import com.nasuh.walletservice.common.exception.ResourceNotFoundException;
 import com.nasuh.walletservice.identity.domain.User;
 import com.nasuh.walletservice.identity.infrastructure.UserRepository;
 import com.nasuh.walletservice.wallet.api.CreateWalletRequest;
@@ -29,7 +30,7 @@ public class WalletService {
   public Wallet create(
       CreateWalletRequest request) {
     User user = userRepository.findById(request.userId())
-        .orElseThrow(() -> new IllegalArgumentException("User Not Found"));
+        .orElseThrow(() -> new ResourceNotFoundException("User Not Found"));
     Wallet wallet = new Wallet(user, request.currency());
     return walletRepository.save(wallet);
   }
@@ -37,13 +38,13 @@ public class WalletService {
   @Transactional()
   public Wallet findById(Long id) {
     return walletRepository.findById(id)
-        .orElseThrow(() -> new IllegalArgumentException("wallet not found"));
+        .orElseThrow(() -> new ResourceNotFoundException("wallet not found"));
   }
 
   @Transactional
   public Wallet deposit(Long walletId, BigDecimal amount) {
     Wallet wallet = walletRepository.findById(walletId)
-        .orElseThrow(() -> new IllegalArgumentException("Wallet not found" + walletId));
+        .orElseThrow(() -> new ResourceNotFoundException("Wallet not found" + walletId));
     wallet.credit(amount);
     return wallet;
   }

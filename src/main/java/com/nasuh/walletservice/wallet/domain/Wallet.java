@@ -3,6 +3,8 @@ package com.nasuh.walletservice.wallet.domain;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
+import com.nasuh.walletservice.common.exception.BadRequestResponse;
+import com.nasuh.walletservice.common.exception.InsufficientBalanceError;
 import com.nasuh.walletservice.identity.domain.User;
 
 import jakarta.persistence.Column;
@@ -81,17 +83,17 @@ public class Wallet {
 
   public void credit(BigDecimal amount) {
     if (amount == null || amount.signum() <= 0) {
-      throw new IllegalArgumentException("Amount must be greater than zero");
+      throw new BadRequestResponse("Amount must be greater than zero");
     }
     this.balance = this.balance.add(amount);
   }
 
   public void debit(BigDecimal amount) {
     if (amount == null || amount.signum() <= 0) {
-      throw new IllegalArgumentException("Amount must be greater than zero");
+      throw new BadRequestResponse("Amount must be greater than zero");
     }
     if (this.balance.compareTo(amount) < 0) {
-      throw new IllegalArgumentException("Insufficient balance");
+      throw new InsufficientBalanceError("Insufficient balance");
     }
     this.balance = this.balance.subtract(amount);
   }
