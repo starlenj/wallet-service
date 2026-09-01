@@ -2,7 +2,6 @@ package com.nasuh.walletservice.transfer.application;
 
 import org.springframework.stereotype.Service;
 
-import com.nasuh.walletservice.common.exception.BadRequestResponse;
 import com.nasuh.walletservice.common.exception.ResourceNotFoundException;
 import com.nasuh.walletservice.ledger.domain.LedgerEntry;
 import com.nasuh.walletservice.ledger.domain.LedgerEntryType;
@@ -31,17 +30,34 @@ public class TransferService {
   }
 
   @Transactional
-  public Transfer create(CreateTransferRequest request) {
-    if (request.sourceWalletId().equals(request.targetWalletId())) {
-      throw new BadRequestResponse("Source and target wallets cannot be the same");
-    }
-    Wallet sourceWallet = walletRepository.findById(request.sourceWalletId())
-        .orElseThrow(() -> new ResourceNotFoundException("Source wallet not found"));
+  public Transfer create(String idemmpotencyKey, CreateTransferRequest request) {
 
-    Wallet targetWallet = walletRepository.findById(request.targetWalletId())
-        .orElseThrow(() -> new ResourceNotFoundException("Target wallet not found"));
+    if (request.sourceWalletId().equals(request.targetWalletId())) {
+      throw new IllegalArgumentException("Source and target wallets cannot be the same");
+    }
+    transferRepository.lockIdempotencyKey(idemmpotencyKey);
+
+    Transfer existingTransfer = transferRepository.findByIdempotencyKey(idemmpotencyKey).orElse(null);
+
+    if (existingTransfer != null) {
+      return existingTransfer;
+    }
+
+    Long firstWalletId = Math.min(
+        request.sourceWalletId(),
+        request.targetWalletId());
+
+    Long secondWalletId = Math.max(
+        request.sourceWalletId(),
+        request.targetWalletId());
+
+    Wallet sourceWallet = walletRepository.findBydIdForUpdate(firstWalletId)
+        .orElseThrow(() -> new IllegalArgumentException("Source wallet not found"));
+
+    Wallet targetWallet = walletRepository.findBydIdForUpdate(secondWalletId)
+        .orElseThrow(() -> new IllegalArgumentException("Target wallet not found"));
     if (sourceWallet.getCurrency() != targetWallet.getCurrency()) {
-      throw new BadRequestResponse("Wallet currency must match");
+      throw new IllegalArgumentException("Wallet currency must match");
     }
     sourceWallet.debit(request.amount());
     targetWallet.credit(request.amount());
@@ -50,7 +66,8 @@ public class TransferService {
         sourceWallet,
         targetWallet,
         request.amount(),
-        sourceWallet.getCurrency());
+        sourceWallet.getCurrency(),
+        idemmpotencyKey);
 
     transferRepository.save(transfer);
     LedgerEntry debitEntry = new LedgerEntry(sourceWallet, transfer, LedgerEntryType.DEBIT, request.amount());
@@ -64,6 +81,7 @@ public class TransferService {
 
   @Transactional
   public Transfer findById(Long id) {
-    return transferRepository.findById(id).orElseThrow(() -> new ResourceNotFoundException("Transfer Not found"));
+    return transferRepository.findById(id)
+        .orElseThrow(() -> new ResourceNotFoundException("Transfer not found " + id));
   }
 }

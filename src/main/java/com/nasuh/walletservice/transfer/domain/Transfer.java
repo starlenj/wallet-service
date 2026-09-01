@@ -46,12 +46,15 @@ public class Transfer {
 
   @Column(name = "created_at", nullable = false)
   private LocalDateTime createdAt;
+  @Column(name = "idempotency_key", unique = true, length = 100)
+  private String idempotencyKey;
 
   protected Transfer() {
 
   }
 
-  public Transfer(Wallet sourceWallet, Wallet targetWallet, BigDecimal amount, CurrencyCode currency) {
+  public Transfer(Wallet sourceWallet, Wallet targetWallet, BigDecimal amount, CurrencyCode currency,
+      String idempotencyKey) {
 
     this.sourceWallet = sourceWallet;
     this.targetWallet = targetWallet;
@@ -59,6 +62,7 @@ public class Transfer {
     this.currency = currency;
     this.status = TransferStatus.PENDING;
     this.createdAt = LocalDateTime.now();
+    this.idempotencyKey = idempotencyKey;
   }
 
   public void complete() {
@@ -87,6 +91,10 @@ public class Transfer {
 
   public TransferStatus getStatus() {
     return this.status;
+  }
+
+  public String getIdemKey() {
+    return this.idempotencyKey;
   }
 
 }

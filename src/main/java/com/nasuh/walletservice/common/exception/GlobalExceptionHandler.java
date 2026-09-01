@@ -49,4 +49,17 @@ public class GlobalExceptionHandler {
         request.getRequestURI());
     return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(response);
   }
+
+  @ExceptionHandler(ConflictResponse.class)
+  public ResponseEntity<ApiErrorResponse> conflictCheckResponse(
+      ConflictResponse exception,
+      HttpServletRequest request) {
+    ApiErrorResponse response = new ApiErrorResponse(
+        Instant.now(),
+        HttpStatus.CONFLICT.value(),
+        HttpStatus.CONFLICT.getReasonPhrase(),
+        exception.getMessage(),
+        request.getRequestURI());
+    return ResponseEntity.status(HttpStatus.CONFLICT).body(response);
+  }
 }

@@ -19,6 +19,8 @@ Currently implemented:
 - Deposit operation
 - Domain-level credit/debit operations
 - Transactional wallet-to-wallet transfers
+- Idempotent transfer creation with the `Idempotency-Key` header
+- Concurrent transfer protection with PostgreSQL advisory and pessimistic row locks
 - Automatic debit and credit ledger entries for each transfer
 - Transfer status tracking
 - PostgreSQL persistence
@@ -29,7 +31,7 @@ Currently implemented:
 - Structured API error responses
 - Dockerized application and PostgreSQL environment
 
-Concurrency controls, idempotency, event-driven processing, and other advanced distributed-system features are currently under development.
+Event-driven processing, integration testing, and other advanced distributed-system features are currently under development.
 
 ---
 
@@ -134,6 +136,7 @@ Transfer
  ├── Target Wallet
  ├── Amount
  ├── Currency
+ ├── Idempotency Key
  └── Status
 
 Ledger Entry
@@ -154,7 +157,7 @@ wallet.debit(amount);
 
 rather than exposing arbitrary balance setters.
 
-Transfers run inside a single database transaction. A successful transfer debits the source wallet, credits the target wallet, creates the transfer record, and writes matching `DEBIT` and `CREDIT` ledger entries. Any failure rolls back the complete operation.
+Transfers run inside a single database transaction. Each request is serialized by its idempotency key, and both wallet rows are locked in a consistent ID order before their balances are changed. A successful transfer debits the source wallet, credits the target wallet, creates the transfer record, and writes matching `DEBIT` and `CREDIT` ledger entries. Any failure rolls back the complete operation.
 
 ---
 
@@ -168,7 +171,8 @@ Current migrations:
 
 ```text
 V1__create_users_and_wallets.sql
-V2__create_transfers_and_ledger_entries.sql
+V2__create_transfer_and_ledger_entries.sql
+V3__add_idem_key_to_transfers.sql
 ```
 
 Hibernate is configured with schema validation:
@@ -310,6 +314,7 @@ GET /api/v1/wallets/1
 
 ```http
 POST /api/v1/transfers
+Idempotency-Key: 8db8bc32-178c-4e61-a4af-7c454758db95
 ```
 
 ```json
@@ -333,7 +338,7 @@ Example response:
 }
 ```
 
-The source and target wallets must be different and use the same currency. The source wallet must have sufficient balance.
+The `Idempotency-Key` header is required. Repeating a request with the same key returns the previously created transfer without applying the balance changes again. The source and target wallets must be different and use the same currency. The source wallet must have sufficient balance.
 
 ### Get Transfer
 
@@ -365,7 +370,12 @@ All balance, transfer, and ledger changes occur within a single database transac
 Transfer Request
       │
       ▼
-Load Source Wallet
+Acquire Idempotency-Key Advisory Lock
+      │
+      ├── Existing Transfer ──► Return Existing Result
+      │
+      ▼
+Lock Both Wallet Rows in ID Order
       │
       ├── Validate balance
       │
@@ -411,19 +421,16 @@ Transfer B → 800 TRY
 
 The system must prevent both transactions from spending the same balance.
 
-The project will explore:
+The current implementation uses pessimistic write locks and loads wallet rows in a consistent ID order to serialize conflicting balance updates and reduce deadlock risk. Further work will explore:
 
 - Optimistic locking
-- Pessimistic locking
 - Transaction isolation levels
 - Race conditions
 - Lost updates
 
 ### Idempotency
 
-Payment requests may be retried because of network failures.
-
-The API will support idempotency to prevent the same logical transfer from being executed multiple times.
+Payment requests may be retried because of network failures. Transfer creation therefore requires an `Idempotency-Key`. PostgreSQL transaction-level advisory locking serializes concurrent requests that use the same key, while a unique database index prevents duplicate transfer records.
 
 ### Reliable Event Publishing
 
@@ -460,10 +467,10 @@ Planned topics include:
 
 ### Phase 2 — Consistency & Concurrency
 
-- [ ] Idempotency keys
-- [ ] Concurrent transfer protection
+- [x] Idempotency keys
+- [x] Concurrent transfer protection
 - [ ] Optimistic locking
-- [ ] Pessimistic locking
+- [x] Pessimistic locking
 - [ ] Integration tests
 - [ ] Testcontainers
 
