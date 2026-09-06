@@ -20,18 +20,22 @@ Currently implemented:
 - Domain-level credit/debit operations
 - Transactional wallet-to-wallet transfers
 - Idempotent transfer creation with the `Idempotency-Key` header
+- Request fingerprint validation for safe idempotency-key reuse
 - Concurrent transfer protection with PostgreSQL advisory and pessimistic row locks
 - Automatic debit and credit ledger entries for each transfer
 - Transfer status tracking
+- Transactional outbox records for completed transfers
+- Scheduled publication of pending outbox events to Kafka
+- Local Kafka and Kafka UI services
 - PostgreSQL persistence
 - Database migrations with Flyway
 - Transfer persistence model
 - Ledger persistence model
 - Request validation
 - Structured API error responses
-- Dockerized application and PostgreSQL environment
+- Dockerized application, PostgreSQL, Kafka, and Kafka UI environment
 
-Event-driven processing, integration testing, and other advanced distributed-system features are currently under development.
+Consumer-side event processing, integration testing, and other advanced distributed-system features are currently under development.
 
 ---
 
@@ -46,12 +50,12 @@ Event-driven processing, integration testing, and other advanced distributed-sys
 - Flyway
 - Spring Validation
 - Spring Security
+- Spring for Apache Kafka
 - Gradle
 - Docker / Docker Compose
 
 Planned:
 
-- Kafka
 - Redis
 - Testcontainers
 - OpenTelemetry
@@ -93,7 +97,12 @@ src/main/java/com/nasuh/walletservice/
 │   ├── domain/
 │   └── infrastructure/
 │
-└── ledger/
+├── ledger/
+│   ├── domain/
+│   └── infrastructure/
+│
+└── outbox/
+    ├── application/
     ├── domain/
     └── infrastructure/
 ```
@@ -137,6 +146,7 @@ Transfer
  ├── Amount
  ├── Currency
  ├── Idempotency Key
+ ├── Request Hash
  └── Status
 
 Ledger Entry
@@ -144,6 +154,12 @@ Ledger Entry
  ├── Transfer
  ├── Type (DEBIT / CREDIT)
  └── Amount
+
+Outbox Event
+ ├── Aggregate Type / ID
+ ├── Event Type
+ ├── JSON Payload
+ └── Status (PENDING / PUBLISHED)
 ```
 
 Money is represented using `BigDecimal` rather than floating-point types.
@@ -157,7 +173,9 @@ wallet.debit(amount);
 
 rather than exposing arbitrary balance setters.
 
-Transfers run inside a single database transaction. Each request is serialized by its idempotency key, and both wallet rows are locked in a consistent ID order before their balances are changed. A successful transfer debits the source wallet, credits the target wallet, creates the transfer record, and writes matching `DEBIT` and `CREDIT` ledger entries. Any failure rolls back the complete operation.
+Transfers run inside a single database transaction. Each request is serialized by its idempotency key, and both wallet rows are locked in a consistent ID order before their balances are changed. A successful transfer debits the source wallet, credits the target wallet, creates the transfer record, writes matching `DEBIT` and `CREDIT` ledger entries, and persists a `PENDING` outbox event. Any failure rolls back the complete operation.
+
+A scheduled publisher reads pending outbox events in batches of up to 100, publishes their JSON payloads to the `wallet.transfer.completed` Kafka topic, and then marks them as `PUBLISHED`. The transfer ID is used as the Kafka record key, preserving per-transfer ordering at the partition level.
 
 ---
 
@@ -173,6 +191,8 @@ Current migrations:
 V1__create_users_and_wallets.sql
 V2__create_transfer_and_ledger_entries.sql
 V3__add_idem_key_to_transfers.sql
+V4__add_request_hash_to_transfers.sql
+V5__create_outbox_events.sql
 ```
 
 Hibernate is configured with schema validation:
@@ -197,7 +217,7 @@ This allows Flyway to remain responsible for database schema evolution while Hib
 
 ### Docker Compose (Recommended)
 
-Build and start both PostgreSQL and the application:
+Build and start PostgreSQL, Kafka, Kafka UI, and the application:
 
 ```bash
 docker compose up -d --build
@@ -207,6 +227,12 @@ PostgreSQL is health-checked before the application starts. The API will be avai
 
 ```text
 http://localhost:8080
+```
+
+Kafka is exposed to the host at `localhost:9092`. Kafka UI is available at:
+
+```text
+http://localhost:8081
 ```
 
 View service status and application logs:
@@ -232,10 +258,10 @@ docker compose down -v
 
 ### Run the Application Locally
 
-This option requires Java 17+. Start only PostgreSQL first:
+This option requires Java 17+. Start PostgreSQL and Kafka first:
 
 ```bash
-docker compose up -d postgres
+docker compose up -d postgres kafka kafka-ui
 ```
 
 Then run Spring Boot:
@@ -249,6 +275,8 @@ The API will be available at:
 ```text
 http://localhost:8080
 ```
+
+By default, the application connects to PostgreSQL at `localhost:5432` and Kafka at `localhost:9092`. These endpoints can be overridden with `SPRING_DATASOURCE_URL` and `SPRING_KAFKA_BOOTSTRAP_SERVERS`.
 
 ---
 
@@ -338,7 +366,7 @@ Example response:
 }
 ```
 
-The `Idempotency-Key` header is required. Repeating a request with the same key returns the previously created transfer without applying the balance changes again. The source and target wallets must be different and use the same currency. The source wallet must have sufficient balance.
+The `Idempotency-Key` header is required. Repeating the same request with the same key returns the previously created transfer without applying the balance changes again. The source wallet ID, target wallet ID, and normalized amount are hashed with SHA-256; reusing the key with a different request returns a conflict response. The source and target wallets must be different and use the same currency. The source wallet must have sufficient balance.
 
 ### Get Transfer
 
@@ -372,15 +400,13 @@ Transfer Request
       ▼
 Acquire Idempotency-Key Advisory Lock
       │
-      ├── Existing Transfer ──► Return Existing Result
+      ├── Same Key + Same Request ──► Return Existing Result
+      ├── Same Key + Different Request ──► Conflict
       │
       ▼
 Lock Both Wallet Rows in ID Order
       │
       ├── Validate balance
-      │
-      ▼
-Load Target Wallet
       │
       ▼
 Debit Source
@@ -395,7 +421,16 @@ Create Transfer
       └── CREDIT Ledger Entry
       │
       ▼
+Create PENDING Outbox Event
+      │
+      ▼
 Commit
+      │
+      ▼
+Scheduled Publisher ──► Kafka (`wallet.transfer.completed`)
+      │
+      ▼
+Mark Outbox Event as PUBLISHED
 ```
 
 If any operation fails, the entire transaction is rolled back.
@@ -430,13 +465,11 @@ The current implementation uses pessimistic write locks and loads wallet rows in
 
 ### Idempotency
 
-Payment requests may be retried because of network failures. Transfer creation therefore requires an `Idempotency-Key`. PostgreSQL transaction-level advisory locking serializes concurrent requests that use the same key, while a unique database index prevents duplicate transfer records.
+Payment requests may be retried because of network failures. Transfer creation therefore requires an `Idempotency-Key`. PostgreSQL transaction-level advisory locking serializes concurrent requests that use the same key, while a unique database index prevents duplicate transfer records. A SHA-256 request hash also prevents an idempotency key from being silently reused for different transfer parameters.
 
 ### Reliable Event Publishing
 
-A future version will publish domain events through Kafka.
-
-The system will explore the **Transactional Outbox Pattern** to handle cases where a database transaction succeeds but event publishing fails.
+Completed transfers and their outbox events are written in the same database transaction. A scheduled publisher sends pending events to Kafka after commit, avoiding the database/Kafka dual-write problem. Publisher retries, duplicate-delivery handling, and consumer-side idempotency remain areas for further development.
 
 ### Event Processing
 
@@ -476,9 +509,10 @@ Planned topics include:
 
 ### Phase 3 — Event-Driven Architecture
 
-- [ ] Kafka
-- [ ] Domain events
-- [ ] Transactional Outbox Pattern
+- [x] Kafka
+- [x] Transfer completed events
+- [x] Transactional Outbox Pattern
+- [x] Scheduled outbox publisher
 - [ ] Retry strategy
 - [ ] Dead Letter Queue
 - [ ] Idempotent consumers

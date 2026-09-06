@@ -48,13 +48,15 @@ public class Transfer {
   private LocalDateTime createdAt;
   @Column(name = "idempotency_key", unique = true, length = 100)
   private String idempotencyKey;
+  @Column(name = "request_hash", length = 64)
+  private String requestHash;
 
   protected Transfer() {
 
   }
 
   public Transfer(Wallet sourceWallet, Wallet targetWallet, BigDecimal amount, CurrencyCode currency,
-      String idempotencyKey) {
+      String idempotencyKey, String requestHash) {
 
     this.sourceWallet = sourceWallet;
     this.targetWallet = targetWallet;
@@ -63,6 +65,11 @@ public class Transfer {
     this.status = TransferStatus.PENDING;
     this.createdAt = LocalDateTime.now();
     this.idempotencyKey = idempotencyKey;
+    this.requestHash = requestHash;
+  }
+
+  public String getRequestHash() {
+    return this.requestHash;
   }
 
   public void complete() {

@@ -2,10 +2,13 @@ package com.nasuh.walletservice.transfer.application;
 
 import org.springframework.stereotype.Service;
 
+import com.nasuh.walletservice.common.exception.ConflictResponse;
 import com.nasuh.walletservice.common.exception.ResourceNotFoundException;
+import com.nasuh.walletservice.common.utils.RequestHashUtil;
 import com.nasuh.walletservice.ledger.domain.LedgerEntry;
 import com.nasuh.walletservice.ledger.domain.LedgerEntryType;
 import com.nasuh.walletservice.ledger.infrastructure.LedgerEntryRepository;
+import com.nasuh.walletservice.outbox.application.OutboxService;
 import com.nasuh.walletservice.transfer.api.CreateTransferRequest;
 import com.nasuh.walletservice.transfer.domain.Transfer;
 import com.nasuh.walletservice.transfer.infrastructure.TransferRepository;
@@ -19,19 +22,23 @@ public class TransferService {
   private final WalletRepository walletRepository;
   private final TransferRepository transferRepository;
   private final LedgerEntryRepository ledgerEntryRepository;
+  private final OutboxService outboxService;
 
   public TransferService(
       WalletRepository walletRepository,
       TransferRepository transferRepository,
-      LedgerEntryRepository ledgerEntryRepository) {
+      LedgerEntryRepository ledgerEntryRepository, OutboxService outboxService) {
     this.ledgerEntryRepository = ledgerEntryRepository;
     this.transferRepository = transferRepository;
     this.walletRepository = walletRepository;
+    this.outboxService = outboxService;
   }
 
   @Transactional
   public Transfer create(String idemmpotencyKey, CreateTransferRequest request) {
 
+    String requestHash = RequestHashUtil.transferHash(request.sourceWalletId(), request.targetWalletId(),
+        request.amount());
     if (request.sourceWalletId().equals(request.targetWalletId())) {
       throw new IllegalArgumentException("Source and target wallets cannot be the same");
     }
@@ -40,6 +47,9 @@ public class TransferService {
     Transfer existingTransfer = transferRepository.findByIdempotencyKey(idemmpotencyKey).orElse(null);
 
     if (existingTransfer != null) {
+      if (!existingTransfer.getRequestHash().equals(requestHash)) {
+        throw new ConflictResponse("idemmpotencyKey key was already use with ad different request");
+      }
       return existingTransfer;
     }
 
@@ -67,7 +77,7 @@ public class TransferService {
         targetWallet,
         request.amount(),
         sourceWallet.getCurrency(),
-        idemmpotencyKey);
+        idemmpotencyKey, requestHash);
 
     transferRepository.save(transfer);
     LedgerEntry debitEntry = new LedgerEntry(sourceWallet, transfer, LedgerEntryType.DEBIT, request.amount());
@@ -76,6 +86,14 @@ public class TransferService {
     ledgerEntryRepository.save(debitEntry);
     ledgerEntryRepository.save(creditEntry);
     transfer.complete();
+
+    TransferCompletedEvent event = new TransferCompletedEvent(
+        transfer.getId(),
+        sourceWallet.getId(),
+        targetWallet.getId(),
+        transfer.getAmount(),
+        transfer.getCurrency().name());
+    outboxService.save("TRANSFER", transfer.getId(), "TransferCompeted", event);
     return transfer;
   }
 
