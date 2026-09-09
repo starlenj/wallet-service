@@ -46,6 +46,12 @@ public class OutboxEvent {
   @Column(name = "last_error")
   private String lastError;
 
+  @Column(name = "processing_started_at")
+  private LocalDateTime processingStartedAt;
+
+  @Column(name = "next_attempt_at")
+  private LocalDateTime nextAttemptAt;
+
   protected OutboxEvent() {
   }
 
@@ -63,9 +69,15 @@ public class OutboxEvent {
     this.retryCount = 0;
   }
 
+  public Long getId() {
+    return this.id;
+  }
+
   public void markPublished() {
     this.status = OutboxStatus.PUBLISHED;
     this.publishedAt = LocalDateTime.now();
+    this.processingStartedAt = null;
+    this.nextAttemptAt = null;
     this.lastError = null;
   }
 
@@ -107,12 +119,21 @@ public class OutboxEvent {
 
   public void markProccessing() {
     this.status = OutboxStatus.PROCESSING;
+    this.processingStartedAt = LocalDateTime.now();
   }
 
   public void markFailed(String error) {
     this.status = OutboxStatus.FAILED;
     this.retryCount++;
     this.lastError = error;
+    this.processingStartedAt = null;
+    long delaySeconds = Math.min(60, 5L * retryCount);
+    this.nextAttemptAt = LocalDateTime.now().plusSeconds(delaySeconds);
+  }
+
+  public void resetForRetry() {
+    this.status = OutboxStatus.PENDING;
+    this.processingStartedAt = null;
   }
 
 }

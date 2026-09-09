@@ -19,7 +19,7 @@ public class OutboxClaimService {
 
   @Transactional
   public List<Long> claimPendinEvents() {
-    List<OutboxEvent> events = outboxEventRepository.findPendindForPublishing();
+    List<OutboxEvent> events = outboxEventRepository.findPendingForPublishing();
 
     for (OutboxEvent event : events) {
       event.markProccessing();

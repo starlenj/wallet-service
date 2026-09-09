@@ -10,6 +10,7 @@ import com.nasuh.walletservice.ledger.domain.LedgerEntry;
 import com.nasuh.walletservice.ledger.domain.LedgerEntryType;
 import com.nasuh.walletservice.ledger.infrastructure.LedgerEntryRepository;
 import com.nasuh.walletservice.outbox.application.OutboxService;
+import com.nasuh.walletservice.outbox.domain.OutboxStatus;
 import com.nasuh.walletservice.transfer.api.CreateTransferRequest;
 import com.nasuh.walletservice.transfer.domain.Transfer;
 import com.nasuh.walletservice.transfer.infrastructure.TransferRepository;
@@ -94,7 +95,7 @@ public class TransferService {
         targetWallet.getId(),
         transfer.getAmount(),
         transfer.getCurrency().name());
-    outboxService.save("TRANSFER", transfer.getId(), "TransferCompeted", event);
+    outboxService.save("TRANSFER", transfer.getId(), OutboxStatus.COMPLETED.toString(), event);
     return transfer;
   }
 

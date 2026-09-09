@@ -26,6 +26,9 @@ Currently implemented:
 - Transfer status tracking
 - Transactional outbox records for completed transfers
 - Scheduled publication of pending outbox events to Kafka
+- Transactional outbox batch claiming with `FOR UPDATE SKIP LOCKED`
+- Failed publication retries with increasing delays and a failure limit
+- Automatic recovery of stuck `PROCESSING` outbox events
 - Local Kafka and Kafka UI services
 - PostgreSQL persistence
 - Database migrations with Flyway
@@ -76,6 +79,7 @@ Each business capability is separated into its own module:
 ```text
 src/main/java/com/nasuh/walletservice/
 ├── common/
+│   ├── bootstrap/
 │   ├── config/
 │   └── exception/
 │
@@ -159,7 +163,9 @@ Outbox Event
  ├── Aggregate Type / ID
  ├── Event Type
  ├── JSON Payload
- └── Status (PENDING / PUBLISHED)
+ ├── Status (PENDING / PROCESSING / FAILED / PUBLISHED)
+ ├── Retry Count / Last Error
+ └── Processing Started At / Next Attempt At
 ```
 
 Money is represented using `BigDecimal` rather than floating-point types.
@@ -175,7 +181,27 @@ rather than exposing arbitrary balance setters.
 
 Transfers run inside a single database transaction. Each request is serialized by its idempotency key, and both wallet rows are locked in a consistent ID order before their balances are changed. A successful transfer debits the source wallet, credits the target wallet, creates the transfer record, writes matching `DEBIT` and `CREDIT` ledger entries, and persists a `PENDING` outbox event. Any failure rolls back the complete operation.
 
-A scheduled publisher reads pending outbox events in batches of up to 100, publishes their JSON payloads to the `wallet.transfer.completed` Kafka topic, and then marks them as `PUBLISHED`. The transfer ID is used as the Kafka record key, preserving per-transfer ordering at the partition level.
+### Outbox Publication and Recovery
+
+The publisher runs with a one-second fixed delay. `OutboxClaimService` selects up to 100 `PENDING` events, ordered by creation time, using PostgreSQL `FOR UPDATE SKIP LOCKED`. Within that transaction, it marks the selected events as `PROCESSING` and records their processing start time. Locked rows are skipped so concurrent claimers can select other events.
+
+After the claim transaction commits, `OutboxPublisher` sends each JSON payload to the `wallet.transfer.completed` Kafka topic and waits for the send result. The **outbox event ID** is used as the Kafka record key. `OutboxStatusService` updates publication status in separate transactions:
+
+- Success sets the status to `PUBLISHED`, records the publication time, and clears processing, retry scheduling, and error fields.
+- Failure sets the status to `FAILED`, increments `retry_count`, stores `last_error`, and schedules the next attempt after `min(60, 5 × retry_count)` seconds.
+
+`OutboxRecoveryScheduler` runs two recovery jobs:
+
+| Job | Fixed delay | Behavior |
+| --- | --- | --- |
+| Failed event recovery | 5 seconds | Resets `FAILED` events to `PENDING` when `next_attempt_at` is due and `retry_count < 5`. |
+| Stuck event recovery | 30 seconds | Resets events that have been `PROCESSING` for more than two minutes to `PENDING`. |
+
+After five recorded failures, an event remains `FAILED` and is no longer automatically retried. This allows four automatic retries after the initial failed attempt; actual retry timing also depends on the recovery and publisher schedules. Stuck-event recovery does not increment the retry count.
+
+Transfer events currently store `COMPLETED` as their event type; their initial outbox publication status is still `PENDING`.
+
+Kafka delivery and the database status update are separate operations. An event can be delivered again if the process stops after Kafka accepts it but before `PUBLISHED` is persisted, or if a slow publication overlaps with stuck-event recovery. Consumers must handle duplicate delivery. Consumer-side idempotency and a Dead Letter Queue are not implemented yet.
 
 ---
 
@@ -193,6 +219,8 @@ V2__create_transfer_and_ledger_entries.sql
 V3__add_idem_key_to_transfers.sql
 V4__add_request_hash_to_transfers.sql
 V5__create_outbox_events.sql
+V6__add_outbox_retry_fields.sql
+V7__add_outbox_proccessing_fields.sql
 ```
 
 Hibernate is configured with schema validation:
@@ -392,7 +420,7 @@ Invalid requests, missing resources, and insufficient balances return a structur
 
 ## Transfer Flow
 
-All balance, transfer, and ledger changes occur within a single database transaction:
+All balance, transfer, ledger, and initial outbox changes occur within a single database transaction. Publication runs after commit:
 
 ```text
 Transfer Request
@@ -427,13 +455,22 @@ Create PENDING Outbox Event
 Commit
       │
       ▼
-Scheduled Publisher ──► Kafka (`wallet.transfer.completed`)
+Claim PENDING Events → PROCESSING (Separate Transaction)
       │
       ▼
-Mark Outbox Event as PUBLISHED
+Publish to Kafka (`wallet.transfer.completed`)
+      │
+      ├── Success ──► PUBLISHED (Separate Transaction)
+      └── Failure ──► FAILED + Retry Count / Next Attempt
+                          │
+                          ▼
+                    Recovery → PENDING
+                    (When Due and Retry Count < 5)
+
+Stuck PROCESSING (> 2 Minutes) ──► Recovery → PENDING
 ```
 
-If any operation fails, the entire transaction is rolled back.
+If an operation before commit fails, the entire transfer transaction is rolled back. Publication failures after commit are handled by the outbox retry flow and do not undo the completed transfer.
 
 ---
 
@@ -469,7 +506,7 @@ Payment requests may be retried because of network failures. Transfer creation t
 
 ### Reliable Event Publishing
 
-Completed transfers and their outbox events are written in the same database transaction. A scheduled publisher sends pending events to Kafka after commit, avoiding the database/Kafka dual-write problem. Publisher retries, duplicate-delivery handling, and consumer-side idempotency remain areas for further development.
+Completed transfers and their outbox events are written in the same database transaction. The publisher claims events in a short transaction, sends them to Kafka after commit, and records each result in a separate transaction. Failed events are retried with increasing delays, and stuck processing events are recovered automatically. Duplicate-delivery handling, consumer-side idempotency, and handling events that exhaust automatic retries remain areas for further development.
 
 ### Event Processing
 
@@ -478,7 +515,7 @@ Planned topics include:
 - At-least-once delivery
 - Duplicate events
 - Idempotent consumers
-- Retry strategies
+- Consumer retry strategies
 - Dead Letter Queues
 
 ---
@@ -513,7 +550,9 @@ Planned topics include:
 - [x] Transfer completed events
 - [x] Transactional Outbox Pattern
 - [x] Scheduled outbox publisher
-- [ ] Retry strategy
+- [x] Publisher retry strategy with increasing delays
+- [x] Transactional batch claiming with `SKIP LOCKED`
+- [x] Stuck outbox event recovery
 - [ ] Dead Letter Queue
 - [ ] Idempotent consumers
 

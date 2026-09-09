@@ -16,28 +16,40 @@ import jakarta.transaction.Transactional;
 @Service
 public class OutboxPublisher {
   private final OutboxEventRepository outboxEventRepository;
+  private final OutboxClaimService outboxClaimService;
+  private final OutboxStatusService outboxStatusService;
   private final KafkaTemplate<String, String> kafkaTemplate;
 
   public OutboxPublisher(
       OutboxEventRepository outboxEventRepository,
+      OutboxClaimService outboxClaimService,
+      OutboxStatusService outboxStatusService,
       KafkaTemplate<String, String> kafkaTemplate) {
     this.outboxEventRepository = outboxEventRepository;
     this.kafkaTemplate = kafkaTemplate;
+    this.outboxClaimService = outboxClaimService;
+    this.outboxStatusService = outboxStatusService;
   }
 
   @Scheduled(fixedDelay = 1000)
-  @Transactional
   public void publishPendingEvents() {
-    List<OutboxEvent> events = outboxEventRepository.findPendindForPublishing();
-    for (OutboxEvent event : events) {
-      publish(event);
+    List<Long> eventIds = outboxClaimService.claimPendinEvents();
+    for (Long eventId : eventIds) {
+      publish(eventId);
     }
   }
 
-  private void publish(OutboxEvent event) {
-    kafkaTemplate.send(KafkaConfig.TRANSFER_COMPLETED_TOPIC, event.getAggregateId().toString(), event.getPayload())
-        .join();
-    event.markPublished();
+  private void publish(Long eventId) {
+    OutboxEvent event = outboxEventRepository.findById(eventId).orElseThrow();
+    try {
+      kafkaTemplate.send(KafkaConfig.TRANSFER_COMPLETED_TOPIC, event.getId().toString(), event.getPayload())
+          .join();
+      outboxStatusService.markPublished(eventId);
+
+    } catch (Exception e) {
+      outboxStatusService.markFailed(eventId, e.getMessage());
+    }
+
   }
 
 }
