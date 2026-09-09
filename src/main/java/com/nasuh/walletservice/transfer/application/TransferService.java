@@ -1,5 +1,6 @@
 package com.nasuh.walletservice.transfer.application;
 
+import org.apache.coyote.BadRequestException;
 import org.springframework.stereotype.Service;
 
 import com.nasuh.walletservice.common.exception.ConflictResponse;
@@ -62,12 +63,12 @@ public class TransferService {
         request.targetWalletId());
 
     Wallet sourceWallet = walletRepository.findBydIdForUpdate(firstWalletId)
-        .orElseThrow(() -> new IllegalArgumentException("Source wallet not found"));
+        .orElseThrow(() -> new ResourceNotFoundException("Source wallet not found"));
 
     Wallet targetWallet = walletRepository.findBydIdForUpdate(secondWalletId)
-        .orElseThrow(() -> new IllegalArgumentException("Target wallet not found"));
+        .orElseThrow(() -> new ResourceNotFoundException("Target wallet not found"));
     if (sourceWallet.getCurrency() != targetWallet.getCurrency()) {
-      throw new IllegalArgumentException("Wallet currency must match");
+      throw new ResourceNotFoundException("Wallet currency must match");
     }
     sourceWallet.debit(request.amount());
     targetWallet.credit(request.amount());

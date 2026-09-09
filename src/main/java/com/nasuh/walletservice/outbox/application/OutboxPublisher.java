@@ -28,7 +28,7 @@ public class OutboxPublisher {
   @Scheduled(fixedDelay = 1000)
   @Transactional
   public void publishPendingEvents() {
-    List<OutboxEvent> events = outboxEventRepository.findTop100ByStatusOrderByCreatedAtAsc(OutboxStatus.PENDING);
+    List<OutboxEvent> events = outboxEventRepository.findPendindForPublishing();
     for (OutboxEvent event : events) {
       publish(event);
     }

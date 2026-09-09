@@ -40,6 +40,12 @@ public class OutboxEvent {
   @Column(name = "published_at", nullable = false)
   private LocalDateTime publishedAt;
 
+  @Column(name = "retry_count", nullable = false)
+  private int retryCount;
+
+  @Column(name = "last_error")
+  private String lastError;
+
   protected OutboxEvent() {
   }
 
@@ -54,11 +60,13 @@ public class OutboxEvent {
     this.payload = payload;
     this.status = OutboxStatus.PENDING;
     this.createdAt = LocalDateTime.now();
+    this.retryCount = 0;
   }
 
   public void markPublished() {
     this.status = OutboxStatus.PUBLISHED;
     this.publishedAt = LocalDateTime.now();
+    this.lastError = null;
   }
 
   public String getAggregateType() {
@@ -87,6 +95,24 @@ public class OutboxEvent {
 
   public LocalDateTime getPublishedAt() {
     return this.publishedAt;
+  }
+
+  public int getRetryCount() {
+    return this.retryCount;
+  }
+
+  public String getLastError() {
+    return this.lastError;
+  }
+
+  public void markProccessing() {
+    this.status = OutboxStatus.PROCESSING;
+  }
+
+  public void markFailed(String error) {
+    this.status = OutboxStatus.FAILED;
+    this.retryCount++;
+    this.lastError = error;
   }
 
 }
